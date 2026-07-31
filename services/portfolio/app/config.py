@@ -25,7 +25,16 @@ def _build_database_url() -> str:
     return f"postgresql+asyncpg://{user}:{password}@{host}:5432/{name}"
 
 
-DATABASE_URL: str = _build_database_url()
+# DATABASE_URL is resolved lazily via module-level __getattr__ (PEP 562) so
+# that importing other names from this module (STARTING_CASH etc.) does not
+# force DB_PASSWORD to be set. Unit tests that don't touch the database can
+# import from this module in a clean environment without a RuntimeError.
+def __getattr__(name: str) -> str:
+    if name == "DATABASE_URL":
+        return _build_database_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 MARKET_DATA_URL: str = os.getenv("MARKET_DATA_URL", "http://localhost:8001")
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 PORT: int = int(os.getenv("PORT", "8003"))

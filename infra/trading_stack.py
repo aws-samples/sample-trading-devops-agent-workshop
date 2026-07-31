@@ -166,7 +166,15 @@ class TradingAppStack(Stack):
         # ============================================================
         # ECS Cluster
         # ============================================================
-        cluster = ecs.Cluster(self, "TradingCluster", vpc=vpc)
+        # Container Insights is enabled so that the ECS/ContainerInsights
+        # namespace publishes RunningTaskCount, which the per-service
+        # NoRunningTasks alarms depend on. With Container Insights
+        # disabled, those alarms never receive datapoints and cannot fire.
+        cluster = ecs.Cluster(
+            self, "TradingCluster",
+            vpc=vpc,
+            container_insights=True,
+        )
 
         # Shared task execution role (needs Secrets Manager access for DB secret)
         task_execution_role = iam.Role(
@@ -229,6 +237,7 @@ class TradingAppStack(Stack):
             task_role: iam.Role = order_task_role,
             secrets: dict = None,
             health_check_path: str = "/health",
+            log_group: logs.ILogGroup = None,
         ) -> ecs.FargateService:
             task_def = ecs.FargateTaskDefinition(
                 self, f"{name}TaskDef",
@@ -269,16 +278,28 @@ class TradingAppStack(Stack):
                              "node_modules", "frontend/node_modules", "frontend/dist"],
                 )
 
+            # If a caller-provided log group is passed in, bind the container
+            # to it so log-metric-filters attached to that log group actually
+            # observe container events. Otherwise let the log driver
+            # auto-create one and configure retention via the driver.
+            if log_group is not None:
+                log_driver = ecs.LogDrivers.aws_logs(
+                    stream_prefix=name,
+                    log_group=log_group,
+                )
+            else:
+                log_driver = ecs.LogDrivers.aws_logs(
+                    stream_prefix=name,
+                    log_retention=logs.RetentionDays.ONE_WEEK,
+                )
+
             task_def.add_container(
                 f"{name}Container",
                 image=container_image_obj,
                 port_mappings=[ecs.PortMapping(container_port=port)],
                 environment=environment,
                 secrets=container_secrets,
-                logging=ecs.LogDrivers.aws_logs(
-                    stream_prefix=name,
-                    log_retention=logs.RetentionDays.ONE_WEEK,
-                ),
+                logging=log_driver,
             )
 
             service = ecs.FargateService(
@@ -289,6 +310,14 @@ class TradingAppStack(Stack):
                 security_groups=[ecs_sg],
                 assign_public_ip=False,
                 health_check_grace_period=Duration.seconds(120),
+                # min_healthy_percent=0 lets ECS stop the existing task
+                # before the replacement is healthy. Required for
+                # fault-injection labs where the new task deliberately
+                # cannot start: with the default (100%) ECS keeps the old
+                # task alive indefinitely, so RunningTaskCount stays at 1
+                # and the NoRunningTasks alarm never fires.
+                min_healthy_percent=0,
+                max_healthy_percent=200,
             )
 
             target_group = elbv2.ApplicationTargetGroup(
@@ -336,6 +365,26 @@ class TradingAppStack(Stack):
         # ============================================================
         services_by_name: dict[str, ecs.FargateService] = {}
 
+        # Pre-create log groups for MarketData and Order so that log-metric
+        # filters (defined later in the "Lab Infrastructure" section) attach
+        # to log groups the containers actually write to. If the container
+        # driver auto-creates its own log group and a metric filter is
+        # attached to a different log group of the same name, the filter
+        # observes zero events and the derived alarm never fires.
+        market_data_log_group = logs.LogGroup(
+            self, "MarketDataLogGroup",
+            log_group_name="/ecs/MarketData",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        order_log_group = logs.LogGroup(
+            self, "OrderLogGroup",
+            log_group_name="/ecs/Order",
+            retention=logs.RetentionDays.ONE_WEEK,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         # Market Data Service (needs DynamoDB + S3)
         services_by_name["MarketData"] = create_service(
             name="MarketData", port=8001, container_image="market-data",
@@ -348,6 +397,7 @@ class TradingAppStack(Stack):
                 "S3_BUCKET": historical_bucket.bucket_name,
             },
             priority=10, path_patterns=["/api/symbols*", "/api/market*"],
+            log_group=market_data_log_group,
         )
 
         # Order Service (needs DB access via secret)
@@ -365,6 +415,7 @@ class TradingAppStack(Stack):
             },
             secrets={"DB_PASSWORD": db_url_secret},
             priority=20, path_patterns=["/api/orders*"],
+            log_group=order_log_group,
         )
 
         # Portfolio Service (needs DB access via secret)
@@ -557,20 +608,8 @@ class TradingAppStack(Stack):
         # Lab Infrastructure (CloudWatch + EventBridge + Lambda)
         # ============================================================
 
-        # CloudWatch Log Groups (created by ECS, reference for metric filters)
-        market_data_log_group = logs.LogGroup(
-            self, "MarketDataLogGroup",
-            log_group_name="/ecs/MarketData",
-            retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
-
-        order_log_group = logs.LogGroup(
-            self, "OrderLogGroup",
-            log_group_name="/ecs/Order",
-            retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
+        # Metric filters attach to the log groups created above (before
+        # the ECS services) so filters observe real container log events.
 
         # Metric Filters
         market_data_log_group.add_metric_filter(
@@ -668,22 +707,24 @@ class TradingAppStack(Stack):
         # ============================================================
         # DevOps Agent Webhook Secret (Secrets Manager)
         # ============================================================
-        # The webhook URL is configuration (env var); the HMAC shared secret
-        # is a credential and lives in Secrets Manager. When the deployer does
-        # not supply a value, no Secrets Manager resource is created and the
-        # Lambda short-circuits at invocation time. Workshop Module 0 sets
-        # the secret via:
+        # The webhook URL is configuration (env var); the HMAC shared secret is
+        # a credential and lives in Secrets Manager. Both resources are always
+        # created so a fresh deploy lands with the wiring in place. Placeholder
+        # values are used when the deployer does not pass context; Workshop
+        # Module 0 tells the participant to update the URL (Lambda env) and the
+        # secret (Secrets Manager) after creating their DevOps Agent webhook.
+        # Alternatively, re-deploy with:
         #   cdk deploy -c devops_agent_webhook_url=<url> \
         #              -c devops_agent_webhook_secret=<secret>
-        webhook_secret_arn = ""
-        if devops_agent_webhook_secret:
-            webhook_secret = secretsmanager.Secret(
-                self, "DevOpsAgentWebhookSecret",
-                secret_name="trading-app/devops-agent-webhook-secret",
-                description="HMAC-SHA256 shared secret used to sign DevOps Agent webhook payloads.",
-                secret_string_value=SecretValue.unsafe_plain_text(devops_agent_webhook_secret),
-            )
-            webhook_secret_arn = webhook_secret.secret_arn
+        effective_webhook_url = devops_agent_webhook_url or "PLACEHOLDER_UPDATE_AFTER_DEVOPS_AGENT_SETUP"
+        effective_webhook_secret = devops_agent_webhook_secret or "PLACEHOLDER_UPDATE_AFTER_DEVOPS_AGENT_SETUP"
+
+        webhook_secret = secretsmanager.Secret(
+            self, "DevOpsAgentWebhookSecret",
+            secret_name="trading-app/devops-agent-webhook-secret",
+            description="HMAC-SHA256 shared secret used to sign DevOps Agent webhook payloads. Update this value after creating your DevOps Agent webhook.",
+            secret_string_value=SecretValue.unsafe_plain_text(effective_webhook_secret),
+        )
 
         # ============================================================
         # DevOps Agent Webhook Lambda
@@ -697,10 +738,9 @@ class TradingAppStack(Stack):
             timeout=Duration.seconds(30),
             memory_size=128,
             environment={
-                "WEBHOOK_URL": devops_agent_webhook_url,
+                "WEBHOOK_URL": effective_webhook_url,
                 # Lambda reads the secret value at invocation time using this ARN.
-                # Empty string ⇒ short-circuits without invoking the webhook.
-                "WEBHOOK_SECRET_ARN": webhook_secret_arn,
+                "WEBHOOK_SECRET_ARN": webhook_secret.secret_arn,
             },
             log_retention=logs.RetentionDays.ONE_WEEK,
             description="Forwards CloudWatch Alarms to AWS DevOps Agent for auto-investigation",
@@ -712,9 +752,8 @@ class TradingAppStack(Stack):
             resources=["*"],
         ))
 
-        # Grant Secrets Manager read on the single secret ARN (only when configured)
-        if devops_agent_webhook_secret:
-            webhook_secret.grant_read(webhook_fn)
+        # Grant Secrets Manager read on the single secret ARN
+        webhook_secret.grant_read(webhook_fn)
 
         # SNS topic → Lambda subscription
         alarm_topic.add_subscription(sns_subs.LambdaSubscription(webhook_fn))
