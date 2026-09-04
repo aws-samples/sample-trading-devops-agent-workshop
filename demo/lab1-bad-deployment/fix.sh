@@ -13,18 +13,6 @@ echo "Lab 1: Fixing Bad Deployment — Restoring Previous Task Definition"
 echo "================================================================="
 echo
 
-if [ ! -f "$LAST_GOOD_FILE" ]; then
-    echo "  ERROR: $LAST_GOOD_FILE not found." >&2
-    echo "  This script needs the task definition ARN that inject.sh saved." >&2
-    echo "  If you ran inject.sh on another machine, set the ARN manually:" >&2
-    echo "    echo 'arn:aws:ecs:...:task-definition/TradingAppStack-...:N' > $LAST_GOOD_FILE" >&2
-    exit 1
-fi
-
-LAST_GOOD_TASK_DEF=$(cat "$LAST_GOOD_FILE")
-echo "Restoring to: $LAST_GOOD_TASK_DEF"
-echo
-
 # Resolve cluster + service ARN exactly the same way as inject.sh
 CLUSTER_ARN=$(aws ecs list-clusters --region "$REGION" \
     --query "clusterArns[?contains(@,'TradingCluster')]|[0]" --output text)
@@ -36,6 +24,30 @@ SERVICE_NAME=$(echo "$SERVICE_ARN" | awk -F/ '{print $NF}')
 
 echo "  cluster: $CLUSTER_NAME"
 echo "  service: $SERVICE_NAME"
+echo
+
+# Idempotent pre-check: if inject.sh saved no state file, the fix has either
+# already been applied (state file is removed on success) or was never injected
+# here. Treat an already-healthy service as a safe no-op rather than erroring,
+# so re-running fix.sh (or a "recover everything" pass) never aborts.
+if [ ! -f "$LAST_GOOD_FILE" ]; then
+    RUNNING=$(aws ecs describe-services --region "$REGION" \
+        --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" \
+        --query 'services[0].runningCount' --output text 2>/dev/null || echo "0")
+    if [ "$RUNNING" != "0" ] && [ "$RUNNING" != "None" ]; then
+        echo "  No saved task definition and $SERVICE_NAME already has $RUNNING running task(s)."
+        echo "  Nothing to restore — already recovered."
+        exit 0
+    fi
+    echo "  ERROR: $LAST_GOOD_FILE not found and $SERVICE_NAME has no running tasks." >&2
+    echo "  This script needs the task definition ARN that inject.sh saved." >&2
+    echo "  If you ran inject.sh on another machine, set the ARN manually:" >&2
+    echo "    echo 'arn:aws:ecs:...:task-definition/TradingAppStack-...:N' > $LAST_GOOD_FILE" >&2
+    exit 1
+fi
+
+LAST_GOOD_TASK_DEF=$(cat "$LAST_GOOD_FILE")
+echo "Restoring to: $LAST_GOOD_TASK_DEF"
 echo
 
 aws ecs update-service --region "$REGION" \

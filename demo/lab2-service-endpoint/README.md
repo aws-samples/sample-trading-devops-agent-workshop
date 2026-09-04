@@ -67,7 +67,7 @@ CloudShell.
 # Trigger order traffic to surface the timeout (any order POST will work):
 curl -X POST https://<your-cloudfront-domain>/api/orders \
      -H "Content-Type: application/json" \
-     -d '{"symbol":"AAPL","quantity":1,"side":"buy","type":"market"}'
+     -d '{"session_id":"test","symbol":"AAPL","side":"buy","type":"market","quantity":1}'
 
 # Watch the agent's investigation in your DevOps Agent space
 # (allow ~3-5 minutes for the alarm to fire and the webhook to deliver)
