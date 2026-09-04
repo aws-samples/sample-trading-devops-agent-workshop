@@ -20,14 +20,21 @@ sed -i.bak 's/FROM python:3.12-nonexistent/FROM python:3.11-slim/' \
 rm -f "$REPO_ROOT/services/market-data/Dockerfile.bak"
 
 cd "$REPO_ROOT"
+# Idempotent: only commit/push when the revert actually changed something. A
+# re-run (or a repo already on the good image) leaves nothing staged, and
+# `git commit` would otherwise fail under 'set -e'.
 git add services/market-data/Dockerfile
-git commit -m "fix: restore valid Docker base image python:3.11-slim
+if git diff --cached --quiet; then
+    echo "Dockerfile already on the valid base image — nothing to commit."
+else
+    git commit -m "fix: restore valid Docker base image python:3.11-slim
 
 Reverts invalid image tag 'python:3.12-nonexistent' back to
 'python:3.11-slim' per AWS DevOps Agent mitigation spec.
 
 Resolves: build-market-data job failure (manifest not found)"
-git push
+    git push
+fi
 
 echo
 echo "Fixed. The pipeline should go green now."

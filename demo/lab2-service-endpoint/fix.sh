@@ -13,16 +13,6 @@ echo "Lab 2: Fixing Service Endpoint Misconfiguration"
 echo "================================================"
 echo
 
-if [ ! -f "$LAST_GOOD_FILE" ]; then
-    echo "  ERROR: $LAST_GOOD_FILE not found." >&2
-    echo "  This script needs the task definition ARN that inject.sh saved." >&2
-    exit 1
-fi
-
-LAST_GOOD_TASK_DEF=$(cat "$LAST_GOOD_FILE")
-echo "Restoring to: $LAST_GOOD_TASK_DEF"
-echo
-
 CLUSTER_ARN=$(aws ecs list-clusters --region "$REGION" \
     --query "clusterArns[?contains(@,'TradingCluster')]|[0]" --output text)
 CLUSTER_NAME=$(echo "$CLUSTER_ARN" | awk -F/ '{print $NF}')
@@ -33,6 +23,28 @@ SERVICE_NAME=$(echo "$SERVICE_ARN" | awk -F/ '{print $NF}')
 
 echo "  cluster: $CLUSTER_NAME"
 echo "  service: $SERVICE_NAME"
+echo
+
+# Idempotent pre-check: inject.sh removes the state file on successful fix, so a
+# missing file means the fix is already applied (or was injected elsewhere).
+# Treat an already-healthy service as a safe no-op instead of erroring, so a
+# re-run or "recover everything" pass never aborts under 'set -e'.
+if [ ! -f "$LAST_GOOD_FILE" ]; then
+    RUNNING=$(aws ecs describe-services --region "$REGION" \
+        --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" \
+        --query 'services[0].runningCount' --output text 2>/dev/null || echo "0")
+    if [ "$RUNNING" != "0" ] && [ "$RUNNING" != "None" ]; then
+        echo "  No saved task definition and $SERVICE_NAME already has $RUNNING running task(s)."
+        echo "  Nothing to restore — already recovered."
+        exit 0
+    fi
+    echo "  ERROR: $LAST_GOOD_FILE not found and $SERVICE_NAME has no running tasks." >&2
+    echo "  This script needs the task definition ARN that inject.sh saved." >&2
+    exit 1
+fi
+
+LAST_GOOD_TASK_DEF=$(cat "$LAST_GOOD_FILE")
+echo "Restoring to: $LAST_GOOD_TASK_DEF"
 echo
 
 aws ecs update-service --region "$REGION" \

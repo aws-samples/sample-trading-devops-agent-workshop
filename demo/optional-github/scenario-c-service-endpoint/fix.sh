@@ -20,8 +20,12 @@ sed -i.bak \
 rm -f "$REPO_ROOT/services/order/app/config.py.bak"
 
 cd "$REPO_ROOT"
+# Idempotent: only commit/push when the revert actually changed something.
 git add services/order/app/config.py
-git commit -m "fix(order): revert portfolio service endpoint to env-var config
+if git diff --cached --quiet; then
+    echo "config.py already on the correct endpoint — nothing to commit."
+else
+    git commit -m "fix(order): revert portfolio service endpoint to env-var config
 
 Reverting the hardcoded 'portfolio-v2.internal:8003' endpoint back to
 env-var-driven config. The internal DNS hostname was not provisioned in
@@ -29,7 +33,8 @@ service discovery, causing ConnectError timeouts on every order
 operation.
 
 Resolves: cascading timeout failures in the Order Service"
-git push
+    git push
+fi
 
 echo
 echo "Fix committed and pushed. The pipeline will deploy the fix."

@@ -20,15 +20,20 @@ sed -i.bak \
 rm -f "$REPO_ROOT/services/market-data/app/config.py.bak"
 
 cd "$REPO_ROOT"
+# Idempotent: only commit/push when the revert actually changed something.
 git add services/market-data/app/config.py
-git commit -m "fix(market-data): revert DynamoDB table name to correct value
+if git diff --cached --quiet; then
+    echo "config.py already on the correct table name — nothing to commit."
+else
+    git commit -m "fix(market-data): revert DynamoDB table name to correct value
 
 Reverting table name from 'market-data-ticks-v2' back to env-var-driven
 config with default 'market-data-ticks'. The v2 table was not provisioned
 and the IAM policy does not grant access to it.
 
 Resolves: AccessDeniedException on dynamodb:BatchWriteItem"
-git push
+    git push
+fi
 
 echo
 echo "Fix committed and pushed. The pipeline will deploy the fix."
