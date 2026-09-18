@@ -12,10 +12,10 @@ echo "Lab 1: Fixing Build Failure — Restoring Valid Image"
 echo "==================================================="
 echo
 echo "Action: reverting services/market-data/Dockerfile"
-echo "  FROM python:3.12-nonexistent -> python:3.11-slim"
+echo "  python:3.12-nonexistent -> python:3.11-slim"
 echo
 
-sed -i.bak 's/FROM python:3.12-nonexistent/FROM python:3.11-slim/' \
+sed -i.bak 's/python:3.12-nonexistent/python:3.11-slim/' \
     "$REPO_ROOT/services/market-data/Dockerfile"
 rm -f "$REPO_ROOT/services/market-data/Dockerfile.bak"
 

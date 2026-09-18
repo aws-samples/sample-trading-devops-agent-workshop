@@ -13,19 +13,26 @@ echo "Lab 1: Injecting Build Failure — Bad Docker Image"
 echo "================================================="
 echo
 echo "Action: changing services/market-data/Dockerfile"
-echo "  FROM python:3.11-slim -> python:3.12-nonexistent"
+echo "  python:3.11-slim -> python:3.12-nonexistent"
 echo
 
-sed -i.bak 's/FROM python:3.11-slim/FROM python:3.12-nonexistent/' \
+sed -i.bak 's/python:3.11-slim/python:3.12-nonexistent/' \
     "$REPO_ROOT/services/market-data/Dockerfile"
 rm -f "$REPO_ROOT/services/market-data/Dockerfile.bak"
 
 cd "$REPO_ROOT"
+# Idempotent: only commit/push when the change actually modified something. A
+# re-run (or a repo already on the broken image) leaves nothing staged, and
+# `git commit` would otherwise fail under 'set -e'.
 git add services/market-data/Dockerfile
-git commit -m "feat: upgrade market-data base image to python:3.12-nonexistent
+if git diff --cached --quiet; then
+    echo "Dockerfile already on the broken image tag — nothing to commit."
+else
+    git commit -m "feat: upgrade market-data base image to python:3.12-nonexistent
 
 Upgrading base image for better performance."
-git push
+    git push
+fi
 
 echo
 echo "Injected. The pipeline will fail at the build-market-data job."
